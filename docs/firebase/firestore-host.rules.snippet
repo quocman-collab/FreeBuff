@@ -1,0 +1,54 @@
+// ĐOẠN RULES ĐỂ GHÉP vào service cloud.firestore / match databases/{database}/documents.
+// Không thay toàn bộ rules hiện tại bằng tệp này (còn users, bookings, chat...).
+function hostSignedIn() {
+  return request.auth != null;
+}
+function hostRole() {
+  return hostSignedIn() &&
+    get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'host';
+}
+match /properties/{propertyId} {
+  allow read: if hostSignedIn() && resource.data.hostId == request.auth.uid;
+  // get tài liệu chưa tồn tại cần thiết cho việc tạo/idempotency.
+  allow get: if hostRole() && !exists(/databases/$(database)/documents/properties/$(propertyId));
+  allow create: if hostRole() && request.resource.data.hostId == request.auth.uid
+    && request.resource.data.name is string && request.resource.data.name.size() > 0
+    && request.resource.data.address is string && request.resource.data.address.size() > 0
+    && request.resource.data.city is string && request.resource.data.ward is string
+    && request.resource.data.plannedRooms is int && request.resource.data.plannedRooms > 0 && request.resource.data.plannedRooms <= 1000
+    && request.resource.data.floors is int && request.resource.data.floors > 0 && request.resource.data.floors <= 100
+    && request.resource.data.minRent is number && request.resource.data.minRent >= 0
+    && request.resource.data.maxRent >= request.resource.data.minRent
+    && request.resource.data.images is list && request.resource.data.images.size() >= 1 && request.resource.data.images.size() <= 5
+    && request.resource.data.roomCount == 0
+    && request.resource.data.verificationStatus == 'unverified';
+  allow update: if hostRole() && resource.data.hostId == request.auth.uid
+    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['roomCount'])
+    && request.resource.data.roomCount == resource.data.roomCount + 1
+    && request.resource.data.roomCount <= resource.data.plannedRooms;
+  allow delete: if false;
+}
+// Nếu đã có match /rooms, ghép điều kiện thay vì tạo thêm allow rộng hơn.
+match /rooms/{roomId} {
+  // Luồng người thuê hiện tại đọc toàn bộ rooms để lọc ở client.
+  allow read: if hostSignedIn();
+  allow create: if hostRole() && request.resource.data.hostId == request.auth.uid
+    && request.resource.data.propertyId is string
+    && request.resource.data.roomCode is string && request.resource.data.roomCode.size() > 0
+    && request.resource.data.status == 'available' && request.resource.data.isAvailable == true
+    && request.resource.data.price is number && request.resource.data.price > 0
+    && request.resource.data.deposit is number && request.resource.data.deposit >= 0
+    && request.resource.data.area is number && request.resource.data.area >= 10 && request.resource.data.area <= 100
+    && request.resource.data.capacity is int && request.resource.data.capacity > 0 && request.resource.data.capacity <= 20
+    && request.resource.data.images is list && request.resource.data.images.size() >= 1 && request.resource.data.images.size() <= 8
+    && get(/databases/$(database)/documents/properties/$(request.resource.data.propertyId)).data.hostId == request.auth.uid
+    && request.resource.data.floor > 0
+    && request.resource.data.floor <= get(/databases/$(database)/documents/properties/$(request.resource.data.propertyId)).data.floors
+    && getAfter(/databases/$(database)/documents/properties/$(request.resource.data.propertyId)).data.roomCount
+       == get(/databases/$(database)/documents/properties/$(request.resource.data.propertyId)).data.roomCount + 1
+    && getAfter(/databases/$(database)/documents/properties/$(request.resource.data.propertyId)).data.roomCount
+       <= get(/databases/$(database)/documents/properties/$(request.resource.data.propertyId)).data.plannedRooms;
+  // Form này chưa hỗ trợ sửa/xóa phòng. Giữ quyền booking hiện có nếu cần,
+  // nhưng không cho người thuê sửa hostId, propertyId, giá hoặc mã phòng.
+  allow update, delete: if false;
+}
